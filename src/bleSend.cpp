@@ -4,7 +4,7 @@
 WiSensToolkit *kit = nullptr;
 CommProtocol commType = BLUETOOTH;
 
-const char* deviceName = "Esp1";
+const char* deviceName = "Esp5";
 BluetoothConfig bleConfig{deviceName};
 CommConfig commConfig;
 const int adcPin = A2;
@@ -14,7 +14,7 @@ int readPins[5] = {27, 33, 15, 32, 14};
 void setup() {
   // put your setup code here, to run once:
   commConfig.bluetoothConfig = bleConfig;
-  kit = new WiSensToolkit(32, 32, rowPins, readPins, adcPin, commType, &commConfig, 1);
+  kit = new WiSensToolkit(32, 32, rowPins, readPins, adcPin, commType, &commConfig, 5);
 }
 
 void loop() {

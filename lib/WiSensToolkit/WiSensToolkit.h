@@ -85,12 +85,21 @@ typedef union {
     EspNowConfig espNowConfig;
 } CommConfig;
 
+typedef struct {
+    int numGroundPins; // Number of Digital Pins used to Control Grounding Wires
+    int numReadPins; // Number of Digital Pins used to control Reading wires
+    int* groundPins; // Pointer to array of Digital Pins controlling Grounding Wires
+    int* readPins; // Pointer to array of Digital Pins controlling Reading Wires
+    int adcPin; // Digital Pin for the Analog-to-Digital Converter
+    int resistance; // Resistance to set for the Digital Potentiometer (in Ohms)
+} ReadoutConfig;
+
 class WiSensToolkit
 {
     public:
-        WiSensToolkit(int numRows, int numCols, int* rowPins, int* readPins, int adcPin,  CommProtocol commType, CommConfig* commConfig, int sendId);
-        void scanArray();
-        struct_message tactile_data;
+        ReadoutConfig* thisReadoutConfig;
+        WiSensToolkit(ReadoutConfig* readoutConfig,  CommProtocol commType, CommConfig* commConfig, int sendId);
+        void scanArray(int numNodes, int* startCoords, int* endCoords, bool intermittent);
         bool serial_communication = true;
         void readNode(int row, int col);
 
@@ -113,30 +122,24 @@ class WiSensToolkit
         bool deviceConnected = false;
         bool oldDeviceConnected = false;
         bool serial_print = false; //Flag for printing debug messages to serial monitor
-        int _numRowPins = 0; //Number of digital pins used for multiplexer
-        int _numColPins = 0;
-        int _numRows; //Number of rows to read 
-        int _numCols; //Number of cols to read
-        int* _rowPins;
-        int* _readPins;
-        int zInput = A2; //Pin number of ADC
         uint32_t packetNumber = 0;
         uint8_t packetCount = 0;
+        int8_t thisSendId;
         
         uint8_t* buffer;
         size_t bufferSize;
         CommProtocol currentCommType;
-        CommConfig* currentCommConfig;
+        CommConfig* thisCommConfig;
         void WiFiSetup();
         void sendWiFi();
-        void initCommProtocol(CommProtocol commType, CommConfig* commConfig, int sendId);
+        void initCommProtocol(CommProtocol commType, CommConfig* commConfig);
         void EspNowSetup();
         void sendEspNow();
         void ADCSetup();
         void selectMuxPin(byte pin, bool row);
         void sendResult();
         void createBuffer();
-        void createBufferEsp();    
+        void createBufferEsp(struct_message* tactile_data);    
         
         void sendSerial();
         void initDigiPot(int res);
