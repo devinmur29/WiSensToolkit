@@ -6,7 +6,7 @@
 #define WiSensToolkit_h
 
 #include <esp_now.h>
-#include <esp_adc/adc_oneshot.h>
+#include "driver/i2s.h"
 #include <NimBLEDevice.h>
 
 #include <WiFi.h>
@@ -28,9 +28,13 @@ using namespace std;
 // Define Bluetooth UUID
 #define SERVICE_UUID "dc643f2d-a2f8-4a00-a964-e138b4d82fdb"
 #define CHARACTERISTIC_UUID "1766324e-8b30-4d23-bff2-e5209c3d986f"
+#define EEPROM_SIZE 4096
+#define DATA_START_ADDRESS 1
+#define HEADER_SIZE 2
 
 boolean calibrationCallback();
-extern volatile bool adc_conversion_done;
+
+void setupI2S();
 
 struct struct_message
 {
@@ -644,22 +648,55 @@ private:
     int rows, cols;
 };
 
+class ThreeDArray
+{
+public:
+    ThreeDArray(int depth, int rows, int cols)
+        : depth(depth), rows(rows), cols(cols)
+    {
+        data = new uint16_t[depth * rows * cols];
+    }
+
+    ~ThreeDArray()
+    {
+        delete[] data;
+    }
+
+    uint16_t &operator()(int d, int r, int c)
+    {
+        return data[d * rows * cols + r * cols + c];
+    }
+
+    void copyInto(uint16_t startIdx, uint16_t *src, int length)
+    {
+        int totalSize = depth * rows * cols;
+        for (int i = 0; i < length; ++i)
+        {
+            int index = (startIdx + i) % totalSize;
+            data[index] = src[i];
+        }
+    }
+
+private:
+    uint16_t *data;
+    int depth, rows, cols;
+};
+
 class WiSensToolkit
 {
 public:
     ReadoutConfig *thisReadoutConfig;
     WiSensToolkit(ReadoutConfig *readoutConfig, CommProtocol commType, CommConfig *commConfig, int sendId);
     void scanArray();
-    void scanArrayContinuous();
     void calibrate();
+    void calibrateNoise();
     void stopComms();
     bool serial_communication = true;
     void readNode(int readWire, int groundWire);
     float p = 15;
     float d = 81;
     uint8_t adc_pins[1] = {34};
-    volatile bool adc_coversion_done = false;
-    adc_continuous_data_t *adcResult = NULL;
+    // volatile bool adc_coversion_done = false;
     bool intermittent = false;
     long duration;
     String configString;
@@ -711,7 +748,6 @@ private:
     void EspNowSetup();
     void sendEspNow();
     void ADCSetup();
-    void ADCContinuousSetup();
     void selectMuxPin(int pin, bool row);
     void sendResult();
     void createBuffer(struct_message *tactile_data);
@@ -723,8 +759,6 @@ private:
 };
 
 WiSensToolkit *createKit(bool useSaved);
-
-void ARDUINO_ISR_ATTR adcComplete();
 
 void clearEEPROM(int startAddress, int length);
 

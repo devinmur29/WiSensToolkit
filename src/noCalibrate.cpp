@@ -9,10 +9,10 @@ void setup()
     kit = createKit(true);
     while (!kit->toolkitInit)
     {
-        StaticJsonDocument<1024> doc;
+        StaticJsonDocument<4096> doc;
         Serial.println("Serializing with new config string");
         DeserializationError error = deserializeJson(doc, kit->configString);
-        EepromStream eepromStream(0, 512);
+        EepromStream eepromStream(0, EEPROM_SIZE);
         serializeJson(doc, eepromStream);
         eepromStream.flush();
         Serial.println("New config saved to EEPROM.");
@@ -21,6 +21,7 @@ void setup()
         kit = nullptr;
         kit = createKit(true);
     }
+    setupI2S();
 }
 
 void loop()
@@ -34,12 +35,20 @@ void loop()
         {
             if (kit != nullptr)
             {
-                kit->calibrate();
+                // kit->calibrate();
+            }
+        }
+
+        else if (receivedMessage.equals("noise"))
+        {
+            if (kit != nullptr)
+            {
+                kit->calibrateNoise();
             }
         }
         else
         {
-            StaticJsonDocument<1024> doc;
+            StaticJsonDocument<4096> doc;
             DeserializationError error = deserializeJson(doc, receivedMessage);
 
             if (!error)
@@ -53,7 +62,7 @@ void loop()
                     kit = nullptr;
                 }
 
-                EepromStream eepromStream(0, 512);
+                EepromStream eepromStream(0, EEPROM_SIZE);
                 serializeJson(doc, eepromStream);
                 eepromStream.flush();
                 Serial.println("New config saved to EEPROM.");
@@ -68,6 +77,7 @@ void loop()
             }
         }
     }
+    // Serial.println("Scanning array");
     kit->scanArray();
     // Serial.println(micros());
 }
