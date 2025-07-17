@@ -26,7 +26,7 @@ void clearEEPROM(int startAddress, int length)
     }
 }
 
-void saveUint16ArrayToEEPROM(const uint16_t *data, size_t length)
+void saveArrayToEEPROM(const uint16_t *data, size_t length, string key)
 {
     // Get JSONDoc from EEPROM
     JsonDocument doc;
@@ -35,7 +35,7 @@ void saveUint16ArrayToEEPROM(const uint16_t *data, size_t length)
     error = deserializeJson(doc, eepromStream);
 
     // Add offsets array to the doc
-    JsonArray offsets = doc.createNestedArray("offsets"); // replaces existing value if present
+    JsonArray offsets = doc.createNestedArray(key); // replaces existing value if present
     for (size_t i = 0; i < length; ++i)
     {
         offsets.add(data[i]);
@@ -45,7 +45,7 @@ void saveUint16ArrayToEEPROM(const uint16_t *data, size_t length)
     eepromStream.flush();
 }
 
-bool loadUint16ArrayFromEEPROM(uint16_t *outputArray, size_t maxLength)
+bool loadArrayFromEEPROM(uint16_t *outputArray, size_t maxLength, string key)
 {
 
     EepromStream eepromStream(0, EEPROM_SIZE);
@@ -59,7 +59,7 @@ bool loadUint16ArrayFromEEPROM(uint16_t *outputArray, size_t maxLength)
         return false;
     }
 
-    JsonArray offsets = doc["offsets"];
+    JsonArray offsets = doc[key];
     if (!offsets.isNull())
     {
         int actualLength = 0;
@@ -105,13 +105,13 @@ void setupI2S()
 int16_t readI2S()
 {
     const int totalSamples = 18;
-    const int avgSamples = 4;
+    const int avgSamples = 8;
 
     uint16_t buffer[totalSamples];
     size_t bytes_read;
 
     // Bulk read 16 samples (each is 2 bytes)
-    i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytes_read, portMAX_DELAY);
+    i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytes_read, 10);
 
     // Average the last 8 samples
     uint32_t sum = 0;
@@ -377,11 +377,23 @@ WiSensToolkit::WiSensToolkit(ReadoutConfig *readoutConfig, CommProtocol commType
         error = deserializeJson(doc, eepromStream);
         totalNodes = totalrows * totalcols;
         offsets = new uint16_t[totalNodes]();
+        minReadings = new uint16_t[totalNodes]();
+        bool containsOffsets = false;
+        bool containsMins = false;
 
         if (doc.containsKey("offsets"))
         {
-            loadUint16ArrayFromEEPROM(offsets, totalNodes);
+            loadArrayFromEEPROM(offsets, totalNodes, "offsets");
+            containsOffsets = true;
         }
+
+        if (doc.containsKey("mins"))
+        {
+            loadArrayFromEEPROM(minReadings, totalNodes, "mins");
+            containsMins = true;
+        }
+
+        calibrated = containsOffsets;
 
         totalError = 0;
         intermittentInit = false;
@@ -653,11 +665,12 @@ void WiSensToolkit::calibrateNoise()
             {
                 sum += readI2S();
             }
-            offsets[nodeIdx] = 3072 - sum / numCycles;
+            offsets[nodeIdx] = sum / numCycles;
         }
     }
 
-    saveUint16ArrayToEEPROM(offsets, totalrows * totalcols);
+    saveArrayToEEPROM(offsets, totalrows * totalcols, "offsets");
+    calibrated = true;
     Serial.println("Finished noise calibration");
 }
 
@@ -668,95 +681,137 @@ void WiSensToolkit::calibrateNoise()
  * ADC range while avoiding saturation
  *
  */
-// void WiSensToolkit::calibrate()
-// {
+void WiSensToolkit::calibrate()
+{
 
-//     uint8_t calResistance = 126; // Resistance to run calibration at (about 393 ohms to capture maximum possible sensitivity)
-//     uint8_t packetCount = 0;
-//     uint16_t saturateThreshold = totalNodes * saturatedPercentage;
-//     Serial.print("Threshold is ");
-//     Serial.println(saturateThreshold);
-//     MinValuesTracker tracker(saturateThreshold);
-//     uint16_t reading;
-//     uint16_t nodeIdx;
-//     int *startCoord = thisReadoutConfig->startCoord;
-//     int *endCoord = thisReadoutConfig->endCoord;
-//     (*MCP).setWiperByte(calResistance);
+    uint8_t calResistance = 126; // Resistance to run calibration at (about 393 ohms to capture maximum possible sensitivity)
+    uint8_t packetCount = 0;
+    int numCycles = 100;
+    int totalrows = (thisReadoutConfig->endCoord[1] - thisReadoutConfig->startCoord[1]) + 1;
+    int totalcols = (thisReadoutConfig->endCoord[0] - thisReadoutConfig->startCoord[0]) + 1;
+    uint16_t saturateThreshold = totalNodes * saturatedPercentage;
+    Serial.print("Threshold is ");
+    Serial.println(saturateThreshold);
+    MinValuesTracker tracker(saturateThreshold);
+    uint16_t reading;
+    uint16_t nodeIdx;
+    int *startCoord = thisReadoutConfig->startCoord;
+    int *endCoord = thisReadoutConfig->endCoord;
+    (*MCP).setWiperByte(calResistance);
+    long startTime = millis();
+    long elapsedTime = 0;
+    Serial.println("Starting sensitivity calibration");
+    while (elapsedTime < duration)
+    {
+        for (int y = startCoord[1]; y <= endCoord[1]; y++)
+        {
+            selectMuxPin(y, true);
+            for (int x = startCoord[0]; x <= endCoord[0]; x++)
+            {
+                nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
+                if (packetCount == 0)
+                {
+                    tactile_data->startIdx = nodeIdx;
+                }
+                selectMuxPin(x, false);
+                reading = readI2S();
+                // if (reading < 2235 - offsets[nodeIdx])
+                // {
+                //     reading += offsets[nodeIdx];
+                // }
+                tactile_data->TruePressure[packetCount] = reading;
+                if (packetCount == thisCommConfig->numNodes - 1)
+                {
+                    createBuffer(tactile_data);
+                    sendResult();
+                    packetCount = 0;
+                }
+                else
+                {
+                    packetCount += 1;
+                }
 
-//     // for (size_t i = 0; i < totalNodes; i++)
-//     // {
-//     //     offsets[i] = 2235;
-//     // }
+                // track the adc readout using the min tracker
+                tracker.addNode(nodeIdx, reading);
 
-//     // while (!noisecalibrationCallback())
-//     // {
-//     //     Serial.print('.');
-//     //     delay(500);
-//     // }
+                // increment elapsed time
+                elapsedTime = millis() - startTime;
+            }
+        }
+    }
 
-//     // Serial.println("Waiting to start calibration");
-//     // while (!sensitvitycalibrationCallback())
-//     // {
-//     //     Serial.print('.');
-//     //     delay(500);
-//     // }
-//     // Serial.println("Starting Calibration");
-//     long startTime = millis();
-//     long elapsedTime = 0;
-//     while (elapsedTime < duration)
-//     {
-//         for (int y = startCoord[1]; y <= endCoord[1]; y++)
-//         {
-//             selectMuxPin(y, true);
-//             for (int x = startCoord[0]; x <= endCoord[0]; x++)
-//             {
-//                 nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
-//                 if (packetCount == 0)
-//                 {
-//                     tactile_data->startIdx = nodeIdx;
-//                 }
-//                 selectMuxPin(x, false);
-//                 reading = analogRead(thisReadoutConfig->adcPin);
-//                 // if (reading < 2235 - offsets[nodeIdx])
-//                 // {
-//                 //     reading += offsets[nodeIdx];
-//                 // }
-//                 tactile_data->TruePressure[packetCount] = reading;
-//                 if (packetCount == thisCommConfig->numNodes - 1)
-//                 {
-//                     createBuffer(tactile_data);
-//                     sendResult();
-//                     packetCount = 0;
-//                 }
-//                 else
-//                 {
-//                     packetCount += 1;
-//                 }
+    double vout2 = tracker.avgMinValues();
+    double resOhms = calculateResistance(calResistance, 50000);
 
-//                 // track the adc readout using the min tracker
-//                 tracker.addNode(nodeIdx, reading);
+    // Solve for approx voltage after stage 1 opamp
+    double vout1 = (220 / resOhms) * (1.8 - (vout2 / 4096) * 3.3) + 1.8;
 
-//                 // increment elapsed time
-//                 elapsedTime = millis() - startTime;
-//             }
-//         }
-//     }
+    // Solve for Rpot which will make minimum voltage reading = 0
+    double rpot = (1.8 * 220) / (vout1 - 1.8);
 
-//     double vout2 = tracker.avgMinValues();
-//     double resOhms = calculateResistance(calResistance, 50000);
+    uint8_t potValue = calculatePotValue(rpot, 50000);
 
-//     // Solve for approx voltage after stage 1 opamp
-//     double vout1 = (220 / resOhms) * (1.8 - (vout2 / 4096) * 3.3) + 1.8;
+    Serial.print("Resistance :");
+    Serial.println(potValue);
+    initDigiPot(potValue);
 
-//     // Solve for Rpot which will make minimum voltage reading = 0
-//     double rpot = (1.8 * 220) / (vout1 - 1.8);
+    for (int i = 0; i < totalcols * totalrows; i++)
+    {
+        minReadings[i] = 3072;
+    }
+    startTime = millis();
+    elapsedTime = 0;
+    Serial.println("Reading min values");
+    while (elapsedTime < duration)
+    {
+        for (int y = startCoord[1]; y <= endCoord[1]; y++)
+        {
+            selectMuxPin(y, true);
+            for (int x = startCoord[0]; x <= endCoord[0]; x++)
+            {
+                int fixedX = x - startCoord[0];
+                int fixedY = y - startCoord[1];
+                nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
+                if (packetCount == 0)
+                {
+                    tactile_data->startIdx = nodeIdx;
+                }
+                selectMuxPin(x, false);
 
-//     uint8_t potValue = calculatePotValue(rpot, 50000);
+                int16_t reading = readI2S();
+                if (reading < minReadings[nodeIdx])
+                {
+                    minReadings[nodeIdx] = reading;
+                }
+                elapsedTime = millis() - startTime;
+            }
+        }
+    }
 
-//     Serial.print("Resistance :");
-//     Serial.println(potValue);
-//     initDigiPot(potValue);
-// }
+    saveArrayToEEPROM(minReadings, totalrows * totalcols, "mins");
+    Serial.println("Finished sensitivity calibration");
+}
+
+uint16_t WiSensToolkit::scaleReading(uint16_t reading, int nodeIdx)
+{
+    // Get min and max for this node
+    uint16_t minReading = minReadings[nodeIdx];
+    uint16_t maxReading = offsets[nodeIdx]; // assuming 'offsets' are the calibrated max values
+
+    // Prevent division by zero
+    if (maxReading <= minReading)
+        return 0;
+
+    // Clip the reading to the [min, max] range
+    if (reading < minReading)
+        reading = minReading;
+    if (reading > maxReading)
+        reading = maxReading;
+
+    // Linearly scale reading to [0, 3072]
+    float normalized = (float)(reading - minReading) / (maxReading - minReading);
+    return (uint16_t)(normalized * 3072);
+}
 
 /**
  * @brief converts from a discrete pot step to a resistance in Ohms
@@ -812,7 +867,16 @@ void WiSensToolkit::scanArray()
             // Read actual sample
             // i2s_read(I2S_NUM_0, &i2s_read_buff, sizeof(i2s_read_buff), &bytes_read, portMAX_DELAY);
             // uint16_t raw = i2s_read_buff & 0x0FFF; // Mask to 12-bit
-            int16_t trueReading = readI2S() + offsets[nodeIdx];
+            int16_t i2sReading = readI2S();
+            int16_t trueReading;
+            if (calibrated)
+            {
+                trueReading = i2sReading + (3072 - offsets[nodeIdx]);
+            }
+            else
+            {
+                trueReading = i2sReading;
+            }
             if (trueReading > 3072)
             {
                 trueReading = 3072;

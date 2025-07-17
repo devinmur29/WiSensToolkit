@@ -35,7 +35,7 @@ void loop()
         {
             if (kit != nullptr)
             {
-                // kit->calibrate();
+                kit->calibrate();
             }
         }
 

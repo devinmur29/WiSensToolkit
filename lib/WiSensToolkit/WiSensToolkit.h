@@ -731,11 +731,13 @@ private:
     int8_t thisSendId;
     bool intermittentInit;
     bool firstPass;
+    bool calibrated = false;
     int totalError;
     int currPacket;
     uint8_t *buffer;
     size_t bufferSize;
     uint16_t *offsets;
+    uint16_t *minReadings;
     int totalNodes;
     CommProtocol currentCommType;
     CommConfig *thisCommConfig;
@@ -756,6 +758,7 @@ private:
     void initDigiPot(uint8_t potStep);
     double calculateResistance(uint8_t potValue, int maxResistance);
     uint8_t calculatePotValue(double resistance, int maxResistance);
+    uint16_t scaleReading(uint16_t reading, int nodeIdx);
 };
 
 WiSensToolkit *createKit(bool useSaved);
