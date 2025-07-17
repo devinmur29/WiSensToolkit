@@ -2,21 +2,11 @@
     WiSensToolkit.cpp - Library for wireless tactile sensing
 */
 
-// extern "C"
-// {
-// // Include ESP-IDF headers for ADC continuous mode
-// #include "esp_adc/adc_continuous.h"
-// #include "esp_system.h"
-// }
-
 #include <WiSensToolkit.h>
 #include "Arduino.h"
 
 #define CHANNEL 1
 #define CONVERSIONS_PER_PIN 1
-
-// WiSensToolkit.cpp
-volatile bool adc_conversion_done = false;
 
 /**
  * @brief Clears a section of EEPROM by writing 0xFF to each byte.
@@ -36,35 +26,101 @@ void clearEEPROM(int startAddress, int length)
     }
 }
 
-/**
- * @brief Saves a JSON string with sensor configuration to EEPROM
- *
- * @param data JSON string to be saved
- */
-void saveDataToEEPROM(const String &data)
+void saveUint16ArrayToEEPROM(const uint16_t *data, size_t length)
 {
-    const int EEPROM_SIZE = 512;
-    const int DATA_START_ADDRESS = 1; // Start address for storing data in EEPROM
+    // Get JSONDoc from EEPROM
+    JsonDocument doc;
+    DeserializationError error;
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    error = deserializeJson(doc, eepromStream);
 
-    int length = data.length();
-
-    // Read the length of previously stored data
-    int oldLength = EEPROM.read(DATA_START_ADDRESS);
-
-    // Clear EEPROM data in the range used for storing previous JSON data
-    if (oldLength > 0 && oldLength < EEPROM_SIZE - DATA_START_ADDRESS - 1)
+    // Add offsets array to the doc
+    JsonArray offsets = doc.createNestedArray("offsets"); // replaces existing value if present
+    for (size_t i = 0; i < length; ++i)
     {
-        clearEEPROM(DATA_START_ADDRESS + 1, oldLength);
+        offsets.add(data[i]);
+    }
+    // Put the JSONDoc back in EEPROM
+    serializeJson(doc, eepromStream);
+    eepromStream.flush();
+}
+
+bool loadUint16ArrayFromEEPROM(uint16_t *outputArray, size_t maxLength)
+{
+
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    JsonDocument doc;
+
+    DeserializationError error = deserializeJson(doc, eepromStream);
+    if (error)
+    {
+        Serial.print("Failed to deserialize JSON from EEPROM: ");
+        Serial.println(error.c_str());
+        return false;
     }
 
-    // Write the new length and data to EEPROM
-    EEPROM.write(DATA_START_ADDRESS, length);
-
-    // Write each character of new data to EEPROM
-    for (int i = 0; i < length; i++)
+    JsonArray offsets = doc["offsets"];
+    if (!offsets.isNull())
     {
-        EEPROM.write(DATA_START_ADDRESS + 1 + i, data[i]);
+        int actualLength = 0;
+        for (JsonVariant v : offsets)
+        {
+            outputArray[actualLength++] = v.as<uint16_t>();
+        }
+        return true;
     }
+    else
+    {
+        Serial.println("No 'offsets' array found in JSON.");
+        return false;
+    }
+}
+
+#define SAMPLE_RATE 150000
+#define I2S_DMA_BUF_LEN 8
+#define ADC_UNIT ADC_UNIT_1
+#define ADC_CHANNEL ADC1_CHANNEL_6 // GPIO34
+
+// ========== I2S INIT ==========
+void setupI2S()
+{
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 2,
+        .dma_buf_len = I2S_DMA_BUF_LEN,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0};
+
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    i2s_set_adc_mode(ADC_UNIT, ADC_CHANNEL);
+    i2s_adc_enable(I2S_NUM_0);
+}
+
+int16_t readI2S()
+{
+    const int totalSamples = 18;
+    const int avgSamples = 4;
+
+    uint16_t buffer[totalSamples];
+    size_t bytes_read;
+
+    // Bulk read 16 samples (each is 2 bytes)
+    i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytes_read, portMAX_DELAY);
+
+    // Average the last 8 samples
+    uint32_t sum = 0;
+    for (int i = totalSamples - avgSamples; i < totalSamples; i++)
+    {
+        sum += buffer[i] & 0x0FFF; // Apply 12-bit ADC mask
+    }
+
+    return static_cast<int16_t>(sum / avgSamples);
 }
 
 /**
@@ -79,8 +135,7 @@ void saveDataToEEPROM(const String &data)
 WiSensToolkit *createKit(bool useSaved)
 {
     const int address = 0;
-    const int EEPROM_SIZE = 512; // Define EEPROM size
-    const int TIMEOUT = 300000;  // 5 minutes timeout in milliseconds
+    const int TIMEOUT = 300000; // 5 minutes timeout in milliseconds
 
     if (!Serial)
     {
@@ -238,7 +293,7 @@ WiSensToolkit *createKit(bool useSaved)
     else if (strcmp(protocol, "espnow") == 0)
     {
         commType = CommProtocol::ESPNOW;
-        JsonArray peerAddress = doc["readPins"];
+        JsonArray peerAddress = doc["macAddress"];
         if (delay == 0)
         {
             delay = 12;
@@ -315,8 +370,19 @@ WiSensToolkit::WiSensToolkit(ReadoutConfig *readoutConfig, CommProtocol commType
         int totalcols = (thisReadoutConfig->endCoord[0] - thisReadoutConfig->startCoord[0]) + 1;
         currNodes = new TwoDArray(totalrows, totalcols);
         pastNodes = new TwoDArray(totalrows, totalcols);
-        offsets = new uint16_t[totalrows * totalcols];
+
+        JsonDocument doc;
+        DeserializationError error;
+        EepromStream eepromStream(0, EEPROM_SIZE);
+        error = deserializeJson(doc, eepromStream);
         totalNodes = totalrows * totalcols;
+        offsets = new uint16_t[totalNodes]();
+
+        if (doc.containsKey("offsets"))
+        {
+            loadUint16ArrayFromEEPROM(offsets, totalNodes);
+        }
+
         totalError = 0;
         intermittentInit = false;
         firstPass = false;
@@ -416,9 +482,13 @@ void WiSensToolkit::EspNowSetup()
     // Register peer
     esp_now_peer_info_t peerInfo;
     memset(&peerInfo, 0, sizeof(peerInfo));
+    for (int i = 0; i < 6; i++)
+    {
+        Serial.println(std::get<EspNowConfig>(thisCommConfig->config).peerAddress[i]);
+    }
     memcpy(peerInfo.peer_addr, std::get<EspNowConfig>(thisCommConfig->config).peerAddress, 6);
     peerInfo.channel = CHANNEL;
-    peerInfo.encrypt = 0;
+    peerInfo.encrypt = false;
     // Add peer
     esp_err_t addStatus = esp_now_add_peer(&peerInfo);
     if (addStatus == ESP_OK)
@@ -477,13 +547,9 @@ String WiSensToolkit::WiFiSetup()
             return receivedMessage;
         }
     }
-    // Serial.println("");
-    // Serial.println("WiFi connected");
-    // Serial.println(WiFi.localIP());
 
     while (!tactileClient->connect(*thisIp, std::get<WiFiConfig>(thisCommConfig->config).port))
     {
-        // Serial.println("Initial connection failed");
         delay(500);
         if (Serial.available() > 0)
         {
@@ -510,31 +576,15 @@ void WiSensToolkit::ADCSetup()
         digitalWrite(thisReadoutConfig->groundPins[i], LOW);
         digitalWrite(thisReadoutConfig->readPins[i], LOW);
     }
-    pinMode(thisReadoutConfig->adcPin, INPUT);
+    // pinMode(thisReadoutConfig->adcPin, INPUT);
 }
 
 // ISR Function that will be triggered when ADC conversion is done
-void ARDUINO_ISR_ATTR adcComplete()
-{
-    adc_conversion_done = true;
-}
+// void ARDUINO_ISR_ATTR adcComplete()
+// {
+//     adc_conversion_done = true;
+// }
 
-/**
- * @brief Sets up the Analog to Digital Converter
- */
-void WiSensToolkit::ADCContinuousSetup()
-{
-    Serial.println("Setting up ADC");
-    for (int i = 0; i < 5; i++)
-    {
-        pinMode(thisReadoutConfig->groundPins[i], OUTPUT);
-        pinMode(thisReadoutConfig->readPins[i], OUTPUT);
-        digitalWrite(thisReadoutConfig->groundPins[i], LOW);
-        digitalWrite(thisReadoutConfig->readPins[i], LOW);
-    }
-    analogContinuous(adc_pins, 1, CONVERSIONS_PER_PIN, 20000, &adcComplete);
-    analogContinuousStart();
-}
 /**
  * @brief Callback function which controls the start of calibration
  *
@@ -571,6 +621,46 @@ boolean noisecalibrationCallback()
     return false;
 }
 
+void WiSensToolkit::calibrateNoise()
+{
+    int *startCoord = thisReadoutConfig->startCoord;
+    int *endCoord = thisReadoutConfig->endCoord;
+    uint16_t nodeIdx;
+    uint16_t reading;
+    int totalrows = (thisReadoutConfig->endCoord[1] - thisReadoutConfig->startCoord[1]) + 1;
+    int totalcols = (thisReadoutConfig->endCoord[0] - thisReadoutConfig->startCoord[0]) + 1;
+    int numCycles = 100;
+    Serial.println("Starting noise calibration");
+
+    // Caclulate average across nodes for 10 cycles
+    // Set Max reading - average as the offset to add for each node
+    for (int y = startCoord[1]; y <= endCoord[1]; y++)
+    {
+        selectMuxPin(y, true);
+        for (int x = startCoord[0]; x <= endCoord[0]; x++)
+        {
+            int fixedX = x - startCoord[0];
+            int fixedY = y - startCoord[1];
+            nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
+            if (packetCount == 0)
+            {
+                tactile_data->startIdx = nodeIdx;
+            }
+            selectMuxPin(x, false);
+
+            int32_t sum = 0;
+            for (int i = 0; i < numCycles; i++)
+            {
+                sum += readI2S();
+            }
+            offsets[nodeIdx] = 3072 - sum / numCycles;
+        }
+    }
+
+    saveUint16ArrayToEEPROM(offsets, totalrows * totalcols);
+    Serial.println("Finished noise calibration");
+}
+
 /**
  * @brief Calibrate the device for a particular pressure sensing application
  *
@@ -578,116 +668,95 @@ boolean noisecalibrationCallback()
  * ADC range while avoiding saturation
  *
  */
-void WiSensToolkit::calibrate()
-{
-    int numCycles = 10;
-    uint8_t calResistance = 126; // Resistance to run calibration at (about 393 ohms to capture maximum possible sensitivity)
-    uint8_t packetCount = 0;
-    uint16_t saturateThreshold = totalNodes * saturatedPercentage;
-    Serial.print("Threshold is ");
-    Serial.println(saturateThreshold);
-    MinValuesTracker tracker(saturateThreshold);
-    uint16_t reading;
-    uint16_t nodeIdx;
-    int *startCoord = thisReadoutConfig->startCoord;
-    int *endCoord = thisReadoutConfig->endCoord;
-    (*MCP).setWiperByte(calResistance);
+// void WiSensToolkit::calibrate()
+// {
 
-    // for (size_t i = 0; i < totalNodes; i++)
-    // {
-    //     offsets[i] = 2235;
-    // }
+//     uint8_t calResistance = 126; // Resistance to run calibration at (about 393 ohms to capture maximum possible sensitivity)
+//     uint8_t packetCount = 0;
+//     uint16_t saturateThreshold = totalNodes * saturatedPercentage;
+//     Serial.print("Threshold is ");
+//     Serial.println(saturateThreshold);
+//     MinValuesTracker tracker(saturateThreshold);
+//     uint16_t reading;
+//     uint16_t nodeIdx;
+//     int *startCoord = thisReadoutConfig->startCoord;
+//     int *endCoord = thisReadoutConfig->endCoord;
+//     (*MCP).setWiperByte(calResistance);
 
-    // while (!noisecalibrationCallback())
-    // {
-    //     Serial.print('.');
-    //     delay(500);
-    // }
-    // for (int i = 0; i < numCycles; i++)
-    // {
-    //     for (int y = startCoord[1]; y <= endCoord[1]; y++)
-    //     {
-    //         selectMuxPin(y, true);
-    //         for (int x = startCoord[0]; x <= endCoord[0]; x++)
-    //         {
-    //             nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
-    //             if (packetCount == 0)
-    //             {
-    //                 tactile_data->startIdx = nodeIdx;
-    //             }
-    //             selectMuxPin(x, false);
-    //             reading = analogRead(thisReadoutConfig->adcPin);
-    //             if (reading < offsets[nodeIdx])
-    //             {
-    //                 offsets[nodeIdx] = reading;
-    //             }
-    //         }
-    //     }
-    // }
+//     // for (size_t i = 0; i < totalNodes; i++)
+//     // {
+//     //     offsets[i] = 2235;
+//     // }
 
-    // Serial.println("Waiting to start calibration");
-    // while (!sensitvitycalibrationCallback())
-    // {
-    //     Serial.print('.');
-    //     delay(500);
-    // }
-    // Serial.println("Starting Calibration");
-    long startTime = millis();
-    long elapsedTime = 0;
-    while (elapsedTime < duration)
-    {
-        for (int y = startCoord[1]; y <= endCoord[1]; y++)
-        {
-            selectMuxPin(y, true);
-            for (int x = startCoord[0]; x <= endCoord[0]; x++)
-            {
-                nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
-                if (packetCount == 0)
-                {
-                    tactile_data->startIdx = nodeIdx;
-                }
-                selectMuxPin(x, false);
-                reading = analogRead(thisReadoutConfig->adcPin);
-                // if (reading < 2235 - offsets[nodeIdx])
-                // {
-                //     reading += offsets[nodeIdx];
-                // }
-                tactile_data->TruePressure[packetCount] = reading;
-                if (packetCount == thisCommConfig->numNodes - 1)
-                {
-                    createBuffer(tactile_data);
-                    sendResult();
-                    packetCount = 0;
-                }
-                else
-                {
-                    packetCount += 1;
-                }
+//     // while (!noisecalibrationCallback())
+//     // {
+//     //     Serial.print('.');
+//     //     delay(500);
+//     // }
 
-                // track the adc readout using the min tracker
-                tracker.addNode(nodeIdx, reading);
+//     // Serial.println("Waiting to start calibration");
+//     // while (!sensitvitycalibrationCallback())
+//     // {
+//     //     Serial.print('.');
+//     //     delay(500);
+//     // }
+//     // Serial.println("Starting Calibration");
+//     long startTime = millis();
+//     long elapsedTime = 0;
+//     while (elapsedTime < duration)
+//     {
+//         for (int y = startCoord[1]; y <= endCoord[1]; y++)
+//         {
+//             selectMuxPin(y, true);
+//             for (int x = startCoord[0]; x <= endCoord[0]; x++)
+//             {
+//                 nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
+//                 if (packetCount == 0)
+//                 {
+//                     tactile_data->startIdx = nodeIdx;
+//                 }
+//                 selectMuxPin(x, false);
+//                 reading = analogRead(thisReadoutConfig->adcPin);
+//                 // if (reading < 2235 - offsets[nodeIdx])
+//                 // {
+//                 //     reading += offsets[nodeIdx];
+//                 // }
+//                 tactile_data->TruePressure[packetCount] = reading;
+//                 if (packetCount == thisCommConfig->numNodes - 1)
+//                 {
+//                     createBuffer(tactile_data);
+//                     sendResult();
+//                     packetCount = 0;
+//                 }
+//                 else
+//                 {
+//                     packetCount += 1;
+//                 }
 
-                // increment elapsed time
-                elapsedTime = millis() - startTime;
-            }
-        }
-    }
+//                 // track the adc readout using the min tracker
+//                 tracker.addNode(nodeIdx, reading);
 
-    double vout2 = tracker.avgMinValues();
-    double resOhms = calculateResistance(calResistance, 50000);
+//                 // increment elapsed time
+//                 elapsedTime = millis() - startTime;
+//             }
+//         }
+//     }
 
-    // Solve for approx voltage after stage 1 opamp
-    double vout1 = (220 / resOhms) * (1.8 - (vout2 / 4096) * 3.3) + 1.8;
+//     double vout2 = tracker.avgMinValues();
+//     double resOhms = calculateResistance(calResistance, 50000);
 
-    // Solve for Rpot which will make minimum voltage reading = 0
-    double rpot = (1.8 * 220) / (vout1 - 1.8);
+//     // Solve for approx voltage after stage 1 opamp
+//     double vout1 = (220 / resOhms) * (1.8 - (vout2 / 4096) * 3.3) + 1.8;
 
-    uint8_t potValue = calculatePotValue(rpot, 50000);
+//     // Solve for Rpot which will make minimum voltage reading = 0
+//     double rpot = (1.8 * 220) / (vout1 - 1.8);
 
-    Serial.print("Resistance :");
-    Serial.println(potValue);
-    initDigiPot(potValue);
-}
+//     uint8_t potValue = calculatePotValue(rpot, 50000);
+
+//     Serial.print("Resistance :");
+//     Serial.println(potValue);
+//     initDigiPot(potValue);
+// }
 
 /**
  * @brief converts from a discrete pot step to a resistance in Ohms
@@ -720,8 +789,11 @@ uint8_t WiSensToolkit::calculatePotValue(double resistance, int maxResistance)
  */
 void WiSensToolkit::scanArray()
 {
+    // Serial.println("Scanning array");
     int *startCoord = thisReadoutConfig->startCoord;
     int *endCoord = thisReadoutConfig->endCoord;
+    uint16_t i2s_read_buff; // 2 bytes per sample
+    size_t bytes_read;
     // int start = micros();
     for (int y = startCoord[1]; y <= endCoord[1]; y++)
     {
@@ -730,12 +802,23 @@ void WiSensToolkit::scanArray()
         {
             int fixedX = x - startCoord[0];
             int fixedY = y - startCoord[1];
+            int nodeIdx = (endCoord[0] - startCoord[0] + 1) * fixedY + fixedX;
             if (packetCount == 0)
             {
                 tactile_data->startIdx = (endCoord[0] - startCoord[0] + 1) * (fixedY) + (fixedX);
             }
             selectMuxPin(x, false);
-            int16_t trueReading = analogRead(thisReadoutConfig->adcPin);
+
+            // Read actual sample
+            // i2s_read(I2S_NUM_0, &i2s_read_buff, sizeof(i2s_read_buff), &bytes_read, portMAX_DELAY);
+            // uint16_t raw = i2s_read_buff & 0x0FFF; // Mask to 12-bit
+            int16_t trueReading = readI2S() + offsets[nodeIdx];
+            if (trueReading > 3072)
+            {
+                trueReading = 3072;
+            }
+
+            // int16_t trueReading = analogRead(thisReadoutConfig->adcPin);
             // Serial.println(trueReading);
             // int16_t trueReading = 0;
             if (intermittent)
@@ -770,90 +853,7 @@ void WiSensToolkit::scanArray()
                 (*currNodes)(fixedY, fixedX) = trueReading;
             }
             tactile_data->TruePressure[packetCount] = trueReading;
-            if (packetCount == thisCommConfig->numNodes - 1)
-            {
-                // Serial.println(micros() - start);
-                float avgError = totalError / thisCommConfig->numNodes;
-                createBuffer(tactile_data);
-                if (!intermittent || avgError > d || !intermittentInit)
-                {
-                    sendResult();
-                }
-                else
-                {
-                    // Don't send, use prediction data instead
-                    (*currNodes).copyInto(tactile_data->startIdx, tactile_data->PredPressure, thisCommConfig->numNodes);
-                }
-                packetCount = 0;
-                totalError = 0;
-            }
-            else
-            {
-                packetCount += 1;
-            }
-        }
-    }
-}
-
-void WiSensToolkit::scanArrayContinuous()
-{
-    int *startCoord = thisReadoutConfig->startCoord;
-    int *endCoord = thisReadoutConfig->endCoord;
-    for (int y = startCoord[1]; y <= endCoord[1]; y++)
-    {
-        selectMuxPin(y, true);
-        for (int x = startCoord[0]; x <= endCoord[0]; x++)
-        {
-            int fixedX = x - startCoord[0];
-            int fixedY = y - startCoord[1];
-            if (packetCount == 0)
-            {
-                tactile_data->startIdx = (endCoord[0] - startCoord[0] + 1) * (fixedY) + (fixedX);
-            }
-            selectMuxPin(x, false);
-            while (!adc_conversion_done)
-            {
-            }
-            adc_conversion_done = false;
-            // Read latest sample from ADC (from continuous mode)
-            if (!analogContinuousRead(&adcResult, 0))
-            {
-                Serial.println("ADC read error.");
-                continue;
-            }
-            int16_t trueReading = adcResult[0].avg_read_raw;
-            if (intermittent)
-            {
-                if (intermittentInit)
-                {
-                    int16_t pred;
-                    if ((1 / p) * (*pastNodes)(fixedY, fixedX) < (1 + (1 / p)) * (*currNodes)(fixedY, fixedX))
-                    {
-                        pred = (1 + (1 / p)) * (*currNodes)(fixedY, fixedX) - (1 / p) * (*pastNodes)(fixedY, fixedX);
-                    }
-                    else
-                    {
-                        pred = 0;
-                    }
-                    tactile_data->PredPressure[packetCount] = pred;
-                    totalError = totalError + abs(pred - trueReading);
-                }
-                else
-                {
-                    if (!firstPass && x == endCoord[0] && y == endCoord[1])
-                    {
-                        firstPass = true;
-                    }
-
-                    if (firstPass && x == endCoord[0] && y == endCoord[1])
-                    {
-                        intermittentInit = true;
-                    }
-                }
-                (*pastNodes)(fixedY, fixedX) = (*currNodes)(fixedY, fixedX);
-                (*currNodes)(fixedY, fixedX) = trueReading;
-            }
-            tactile_data->TruePressure[packetCount] = trueReading;
+            // Serial.println(packetCount);
             if (packetCount == thisCommConfig->numNodes - 1)
             {
                 // Serial.println(micros() - start);
@@ -886,29 +886,29 @@ void WiSensToolkit::scanArrayContinuous()
  * Sends the read voltages after numNodes readings
  */
 
-void WiSensToolkit::readNode(int readWire, int groundWire)
-{
-    tactile_data->startIdx = 20000;
-    selectMuxPin(groundWire, true);
-    selectMuxPin(readWire, false);
-    int *startCoord = thisReadoutConfig->startCoord;
-    int *endCoord = thisReadoutConfig->endCoord;
-    int fixedX = readWire - startCoord[0];
-    int fixedY = groundWire - startCoord[1];
-    int16_t trueReading = analogRead(thisReadoutConfig->adcPin);
-    tactile_data->TruePressure[packetCount] = (endCoord[0] - startCoord[0] + 1) * (fixedY) + (fixedX);
-    tactile_data->TruePressure[packetCount + 1] = trueReading;
-    if (packetCount == (thisCommConfig->numNodes) - 2)
-    {
-        createBuffer(tactile_data);
-        sendResult();
-        packetCount = 0;
-    }
-    else
-    {
-        packetCount += 2;
-    }
-}
+// void WiSensToolkit::readNode(int readWire, int groundWire)
+// {
+//     tactile_data->startIdx = 20000;
+//     selectMuxPin(groundWire, true);
+//     selectMuxPin(readWire, false);
+//     int *startCoord = thisReadoutConfig->startCoord;
+//     int *endCoord = thisReadoutConfig->endCoord;
+//     int fixedX = readWire - startCoord[0];
+//     int fixedY = groundWire - startCoord[1];
+//     int16_t trueReading = analogRead(thisReadoutConfig->adcPin);
+//     tactile_data->TruePressure[packetCount] = (endCoord[0] - startCoord[0] + 1) * (fixedY) + (fixedX);
+//     tactile_data->TruePressure[packetCount + 1] = trueReading;
+//     if (packetCount == (thisCommConfig->numNodes) - 2)
+//     {
+//         createBuffer(tactile_data);
+//         sendResult();
+//         packetCount = 0;
+//     }
+//     else
+//     {
+//         packetCount += 2;
+//     }
+// }
 
 /**
  * @brief Toggle the digital pins to select grounding and reading wires
@@ -1032,7 +1032,7 @@ void WiSensToolkit::sendEspNow()
     esp_err_t result = esp_now_send(std::get<EspNowConfig>(thisCommConfig->config).peerAddress, buffer, bufferSize);
     if (result == ESP_OK)
     {
-        Serial.println("Sent with Success");
+        // Serial.println("Sent with Success");
     }
     else
     {
