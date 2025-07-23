@@ -46,6 +46,14 @@ void loop()
                 kit->calibrateNoise();
             }
         }
+
+        else if (receivedMessage.equals("mins"))
+        {
+            if (kit != nullptr)
+            {
+                kit->minCalibrate();
+            }
+        }
         else
         {
             StaticJsonDocument<4096> doc;

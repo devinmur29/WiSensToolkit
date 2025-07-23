@@ -15,6 +15,8 @@
 #include <EEPROM.h>
 #include <StreamUtils.h>
 #include <ArduinoJson.h>
+#include <AD74xx.h>
+#include <SPI.h>
 
 #include "Arduino.h"
 #include <new>
@@ -31,6 +33,10 @@ using namespace std;
 #define EEPROM_SIZE 4096
 #define DATA_START_ADDRESS 1
 #define HEADER_SIZE 2
+
+#define ADC_SCK 5   /// ADC SCK pin
+#define ADC_MISO 19 /// ADC MISO pin
+#define ADC_SS 18   /// ADC CS pin
 
 boolean calibrationCallback();
 
@@ -426,12 +432,13 @@ struct ReadoutConfig
     int *endCoord;     // Pointer to end coordinates
     int adcPin;        // Digital Pin for the Analog-to-Digital Converter
     double resistance; // Resistance to set for the Digital Potentiometer (in Ohms)
+    bool externalAdc;  // Bool for whether or not to use external Adc
 
     // Default Constructor
-    ReadoutConfig() : numGroundPins(0), numReadPins(0), groundPins(nullptr), readPins(nullptr), startCoord(nullptr), endCoord(nullptr), adcPin(0), resistance(0.0) {}
+    ReadoutConfig() : numGroundPins(0), numReadPins(0), groundPins(nullptr), readPins(nullptr), startCoord(nullptr), endCoord(nullptr), adcPin(0), resistance(0.0), externalAdc(false) {}
 
     // Parameterized Constructor
-    ReadoutConfig(int numGroundPins, int numReadPins, int *groundPins, int *readPins, int *startCoord, int *endCoord, int adcPin, double resistance) : numGroundPins(numGroundPins), numReadPins(numReadPins), adcPin(adcPin), resistance(resistance)
+    ReadoutConfig(int numGroundPins, int numReadPins, int *groundPins, int *readPins, int *startCoord, int *endCoord, int adcPin, double resistance, bool externalAdc) : numGroundPins(numGroundPins), numReadPins(numReadPins), adcPin(adcPin), resistance(resistance), externalAdc(externalAdc)
     {
         this->groundPins = new int[numGroundPins];
         this->readPins = new int[numReadPins];
@@ -452,7 +459,7 @@ struct ReadoutConfig
     }
     // Copy Constructor
     ReadoutConfig(const ReadoutConfig &other)
-        : numGroundPins(other.numGroundPins), numReadPins(other.numReadPins), adcPin(other.adcPin), resistance(other.resistance)
+        : numGroundPins(other.numGroundPins), numReadPins(other.numReadPins), adcPin(other.adcPin), resistance(other.resistance), externalAdc(other.externalAdc)
     {
         groundPins = new int[numGroundPins];
         readPins = new int[numReadPins];
@@ -490,6 +497,7 @@ struct ReadoutConfig
         numReadPins = other.numReadPins;
         adcPin = other.adcPin;
         resistance = other.resistance;
+        externalAdc = other.externalAdc;
 
         groundPins = new int[numGroundPins];
         readPins = new int[numReadPins];
@@ -690,6 +698,7 @@ public:
     void scanArray();
     void calibrate();
     void calibrateNoise();
+    void minCalibrate();
     void stopComms();
     bool serial_communication = true;
     void readNode(int readWire, int groundWire);
@@ -715,6 +724,7 @@ private:
     };
     struct_message *tactile_data = nullptr;
     MCP4018 *MCP;
+    AD74xx *myadc = nullptr;
     BLEService *pService = nullptr;
     BLECharacteristic *pCharacteristic = nullptr;
     BLEServer *pServer = nullptr;
