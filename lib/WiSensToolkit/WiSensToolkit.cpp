@@ -655,31 +655,59 @@ void WiSensToolkit::calibrateNoise()
     uint16_t reading;
     int totalrows = (thisReadoutConfig->endCoord[1] - thisReadoutConfig->startCoord[1]) + 1;
     int totalcols = (thisReadoutConfig->endCoord[0] - thisReadoutConfig->startCoord[0]) + 1;
-    int numCycles = 100;
-    Serial.println("Starting noise calibration");
-
-    // Caclulate average across nodes for 10 cycles
-    // Set Max reading - average as the offset to add for each node
-    for (int y = startCoord[1]; y <= endCoord[1]; y++)
+    for (int i = 0; i < totalcols * totalrows; i++)
     {
-        selectMuxPin(y, true);
-        for (int x = startCoord[0]; x <= endCoord[0]; x++)
-        {
-            int fixedX = x - startCoord[0];
-            int fixedY = y - startCoord[1];
-            nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
-            if (packetCount == 0)
-            {
-                tactile_data->startIdx = nodeIdx;
-            }
-            selectMuxPin(x, false);
+        offsets[i] = 0;
+    }
+    Serial.println("Starting noise calibration");
+    long starttime = millis();
+    long elapsedtime = 0;
 
-            int32_t sum = 0;
-            for (int i = 0; i < numCycles; i++)
+    while (elapsedtime < duration)
+    {
+        for (int y = startCoord[1]; y <= endCoord[1]; y++)
+        {
+            selectMuxPin(y, true);
+            for (int x = startCoord[0]; x <= endCoord[0]; x++)
             {
-                sum += readI2S();
+                int fixedX = x - startCoord[0];
+                int fixedY = y - startCoord[1];
+                nodeIdx = (endCoord[0] - startCoord[0] + 1) * (y - startCoord[1]) + (x - startCoord[0]);
+                if (packetCount == 0)
+                {
+                    tactile_data->startIdx = nodeIdx;
+                }
+                selectMuxPin(x, false);
+
+                int16_t reading = 0;
+                if (thisReadoutConfig->externalAdc)
+                {
+                    reading = myadc->getRawValue();
+                }
+                else
+                {
+                    reading = readI2S();
+                }
+
+                tactile_data->TruePressure[packetCount] = reading;
+
+                if (reading > offsets[nodeIdx])
+                {
+                    offsets[nodeIdx] = reading;
+                }
+
+                if (packetCount == thisCommConfig->numNodes - 1)
+                {
+                    createBuffer(tactile_data);
+                    sendResult();
+                    packetCount = 0;
+                }
+                else
+                {
+                    packetCount += 1;
+                }
+                elapsedtime = millis() - starttime;
             }
-            offsets[nodeIdx] = sum / numCycles;
         }
     }
 
@@ -727,8 +755,15 @@ void WiSensToolkit::minCalibrate()
                     tactile_data->startIdx = nodeIdx;
                 }
                 selectMuxPin(x, false);
-
-                int16_t reading = readI2S();
+                int16_t reading;
+                if (thisReadoutConfig->externalAdc)
+                {
+                    reading = myadc->getRawValue();
+                }
+                else
+                {
+                    reading = readI2S();
+                }
 
                 tactile_data->TruePressure[packetCount] = reading;
                 if (packetCount == thisCommConfig->numNodes - 1)
@@ -790,7 +825,15 @@ void WiSensToolkit::calibrate()
                     tactile_data->startIdx = nodeIdx;
                 }
                 selectMuxPin(x, false);
-                reading = readI2S();
+
+                if (thisReadoutConfig->externalAdc)
+                {
+                    reading = myadc->getRawValue();
+                }
+                else
+                {
+                    reading = readI2S();
+                }
                 // if (reading < 2235 - offsets[nodeIdx])
                 // {
                 //     reading += offsets[nodeIdx];
