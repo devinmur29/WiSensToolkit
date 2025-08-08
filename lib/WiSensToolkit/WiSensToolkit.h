@@ -35,8 +35,8 @@ using namespace std;
 #define HEADER_SIZE 2
 
 #define ADC_SCK 5   /// ADC SCK pin
-#define ADC_MISO 19 /// ADC MISO pin
-#define ADC_SS 18   /// ADC CS pin
+#define ADC_MISO 18 /// ADC MISO pin
+#define ADC_SS 19  /// ADC CS pin
 
 boolean calibrationCallback();
 

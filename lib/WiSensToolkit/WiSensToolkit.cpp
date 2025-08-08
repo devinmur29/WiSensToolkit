@@ -600,7 +600,7 @@ void WiSensToolkit::ADCSetup()
     {
         myadc = new AD74xx(AD74xx_TYPE::AD7466);
         Serial.println("Init SPI");
-        SPI.begin(ADC_SCK, ADC_MISO, 17, ADC_SS); // initialization of SPI port
+        SPI.begin(ADC_SCK, ADC_MISO, -1, ADC_SS); // initialization of SPI port
         Serial.println("Init ADC");
         bool initialized = myadc->begin(SPI, ADC_SS);
         Serial.println(initialized);
