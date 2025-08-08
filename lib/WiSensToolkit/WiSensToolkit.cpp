@@ -718,6 +718,7 @@ void WiSensToolkit::calibrateNoise()
 
 void WiSensToolkit::minCalibrate()
 {
+    Serial.println("Starting min calibration");
     int totalrows = (thisReadoutConfig->endCoord[1] - thisReadoutConfig->startCoord[1]) + 1;
     int totalcols = (thisReadoutConfig->endCoord[0] - thisReadoutConfig->startCoord[0]) + 1;
     uint16_t reading;
@@ -735,6 +736,7 @@ void WiSensToolkit::minCalibrate()
         if (Serial.available() > 0)
         {
             String receivedMessage = Serial.readStringUntil('\n');
+            Serial.println(receivedMessage);
             receivedMessage.trim();
             if (receivedMessage.equals("stopMins"))
             {
