@@ -10,11 +10,13 @@ This library is set up to be developed with pioarduino (built on top of platform
 
 Install pioarduino via vscode: https://github.com/pioarduino/platform-espressif32 (follow steps under IDE preparation)
 
-Clone this repo
+Clone this repo or download as a zip.
+
+Open this folder. The pioarduino extension should recognize it and configure the environment/install necessary packages.
 
 ### Get started
 
-Open this folder. The pioarduino extension should recognize it and configure the environment/install necessary packages.
+
 
 Connect the esp32 and open the vscode command window (Ctrl + shift + P). Search "Set project port" and select the serial port of the connected device accordingly.
 
