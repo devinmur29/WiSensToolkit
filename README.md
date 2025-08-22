@@ -14,7 +14,7 @@ Clone this repo or download as a zip.
 
 Open this folder. The pioarduino extension should recognize it and configure the environment/install necessary packages.
 
-Install the CP210x driver, which you will need for your laptop to recognize the microcontrollers: https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads 
+Install the CP210x driver if you haven't already, which you will need for your laptop to recognize the microcontrollers: https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads 
 
 ### Get started
 
