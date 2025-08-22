@@ -6,7 +6,7 @@ Arduino library is in lib/WisensToolkit
 
 This library is set up to be developed with pioarduino (built on top of platformio).
 
-### Prerequisties
+### Installation
 
 Install pioarduino via vscode: https://github.com/pioarduino/platform-espressif32 (follow steps under IDE preparation)
 
