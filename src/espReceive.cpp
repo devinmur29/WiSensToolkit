@@ -39,6 +39,21 @@ void setup()
 
 void loop()
 {
-    // Nothing to do — data is handled in callback
-    // Serial.println("Heelo");
+    if (Serial.available() > 0)
+    {
+        String msg = Serial.readStringUntil('\n');
+        msg.trim();
+        if (msg.equals("getMacAddress"))
+        {
+            uint8_t mac[6];
+            esp_wifi_get_mac(WIFI_IF_STA, mac);
+            Serial.print("[");
+            for (int i = 0; i < 6; i++)
+            {
+                if (i > 0) Serial.print(",");
+                Serial.print(mac[i]);
+            }
+            Serial.println("]");
+        }
+    }
 }

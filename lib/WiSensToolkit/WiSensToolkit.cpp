@@ -76,6 +76,15 @@ bool loadArrayFromEEPROM(uint16_t *outputArray, size_t maxLength, string key)
     }
 }
 
+static const char *DEFAULT_CONFIG =
+    "{\"id\":2,\"protocol\":\"serial\",\"serialPort\":\"COM18\",\"deviceName\":\"Esp2\","
+    "\"startCoord\":[0,0],\"endCoord\":[15,15],\"resistance\":120,"
+    "\"intermittent\":{\"enabled\":false,\"p\":21,\"d\":46},"
+    "\"outlineImage\":\"\",\"saturatedPercentage\":1,\"duration\":60000,"
+    "\"glove\":\"right\",\"size\":\"small\",\"baudrate\":250000,\"numNodes\":120,"
+    "\"groundPins\":[26,25,4,21,12],\"readPins\":[27,33,15,32,14],"
+    "\"adcPin\":34,\"externalAdc\":true}";
+
 #define SAMPLE_RATE 150000
 #define I2S_DMA_BUF_LEN 8
 #define ADC_UNIT ADC_UNIT_1
@@ -158,35 +167,19 @@ WiSensToolkit *createKit(bool useSaved)
     {
         EepromStream eepromStream(address, EEPROM_SIZE);
         error = deserializeJson(doc, eepromStream);
-        // If this fails, we should wait for a new config
         if (error)
         {
-            while (millis() - startMillis < TIMEOUT && !programmed)
+            Serial.println("EEPROM empty or invalid, using default configuration");
+            error = deserializeJson(doc, DEFAULT_CONFIG);
+            if (error)
             {
-                if (Serial.available())
-                {
-                    String inputString = Serial.readStringUntil('\n');
-
-                    if (inputString.length() > 0)
-                    {
-                        error = deserializeJson(doc, inputString);
-                        if (error)
-                        {
-                            Serial.print("deserializeJson() failed: ");
-                            Serial.println(error.c_str());
-                            return nullptr;
-                        }
-                        else
-                        {
-                            EepromStream eepromStream(address, EEPROM_SIZE);
-                            serializeJson(doc, eepromStream);
-                            eepromStream.flush();
-                            Serial.println("JSON String saved to EEPROM");
-                            programmed = true;
-                        }
-                    }
-                }
+                Serial.print("Default config parse failed: ");
+                Serial.println(error.c_str());
+                return nullptr;
             }
+            EepromStream eepromStreamWrite(address, EEPROM_SIZE);
+            serializeJson(doc, eepromStreamWrite);
+            eepromStreamWrite.flush();
         }
     }
     else
@@ -432,6 +425,88 @@ void WiSensToolkit::initDigiPot(uint8_t potStep)
 }
 
 /**
+ * @brief Updates the digital potentiometer immediately and persists the new step value to EEPROM
+ *
+ * @param potStep New wiper position (0–127)
+ */
+void WiSensToolkit::updatePot(uint8_t potStep)
+{
+    (*MCP).setWiperByte(potStep);
+    thisReadoutConfig->resistance = potStep;
+
+    JsonDocument doc;
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    deserializeJson(doc, eepromStream);
+    doc["resistance"] = potStep;
+    EepromStream eepromStreamWrite(0, EEPROM_SIZE);
+    serializeJson(doc, eepromStreamWrite);
+    eepromStreamWrite.flush();
+
+    Serial.print("Pot updated to step ");
+    Serial.print(potStep);
+    Serial.print(" (");
+    Serial.print(calculateResistance(potStep, 50000));
+    Serial.println(" ohms), saved to EEPROM.");
+}
+
+void WiSensToolkit::getPot()
+{
+    uint8_t potStep = (*MCP).getWiperByte();
+    Serial.print("Pot step: ");
+    Serial.print(potStep);
+    Serial.print(" (");
+    Serial.print(calculateResistance(potStep, 50000));
+    Serial.println(" ohms)");
+}
+
+/**
+ * @brief Update the ESP-NOW peer MAC address, re-register the peer if ESP-NOW is
+ * active, and persist the new address to EEPROM
+ *
+ * @param macAddress 6-byte peer MAC address
+ */
+void WiSensToolkit::updateMacAddress(const uint8_t macAddress[6])
+{
+    // Remove the old peer if ESP-NOW has been initialised and a peer exists
+    if (espNowInitialized && std::holds_alternative<EspNowConfig>(thisCommConfig->config))
+    {
+        esp_now_del_peer(std::get<EspNowConfig>(thisCommConfig->config).peerAddress);
+    }
+
+    thisCommConfig->config = EspNowConfig(macAddress);
+
+    // Register the new peer if ESP-NOW is already running
+    if (espNowInitialized)
+    {
+        esp_now_peer_info_t peerInfo;
+        memset(&peerInfo, 0, sizeof(peerInfo));
+        memcpy(peerInfo.peer_addr, macAddress, 6);
+        peerInfo.channel = CHANNEL;
+        peerInfo.encrypt = false;
+        esp_now_add_peer(&peerInfo);
+    }
+
+    // Persist to EEPROM
+    JsonDocument doc;
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    deserializeJson(doc, eepromStream);
+    JsonArray mac = doc["macAddress"].to<JsonArray>();
+    for (int i = 0; i < 6; i++)
+        mac.add(macAddress[i]);
+    EepromStream eepromStreamWrite(0, EEPROM_SIZE);
+    serializeJson(doc, eepromStreamWrite);
+    eepromStreamWrite.flush();
+
+    Serial.print("MAC address updated: ");
+    for (int i = 0; i < 6; i++)
+    {
+        if (i > 0) Serial.print(":");
+        Serial.printf("%02X", macAddress[i]);
+    }
+    Serial.println();
+}
+
+/**
  * @brief Initiates Communication Protocol
  *
  * @param commType type of the communication protocol to initiate
@@ -540,6 +615,7 @@ void WiSensToolkit::EspNowSetup()
     {
         Serial.println("Not sure what happened");
     }
+    espNowInitialized = true;
 }
 
 /**
@@ -1123,6 +1199,101 @@ void WiSensToolkit::stopComms()
     default:
         break;
     }
+}
+
+/**
+ * @brief Toggle transmission between serial and ESP-NOW
+ *
+ * Switches from SERIALCOMM to ESPNOW only if a peer MAC address is available
+ * (either already stored in thisCommConfig or saved in EEPROM). Returns the
+ * active mode name after the toggle.
+ */
+String WiSensToolkit::toggleMode()
+{
+    if (currentCommType == CommProtocol::SERIALCOMM)
+    {
+        bool hasConfig = std::holds_alternative<EspNowConfig>(thisCommConfig->config);
+
+        if (!hasConfig)
+        {
+            EepromStream eepromStream(0, EEPROM_SIZE);
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, eepromStream);
+            if (!error && doc.containsKey("macAddress"))
+            {
+                JsonArray macArray = doc["macAddress"];
+                uint8_t peer[6];
+                for (int i = 0; i < 6; i++)
+                {
+                    peer[i] = macArray[i];
+                }
+                thisCommConfig->config = EspNowConfig(peer);
+                hasConfig = true;
+            }
+        }
+
+        if (!hasConfig)
+        {
+            Serial.println("Cannot toggle: no MAC address configured");
+            return "serial";
+        }
+
+        if (!espNowInitialized)
+        {
+            EspNowSetup();
+        }
+        currentCommType = CommProtocol::ESPNOW;
+        saveModeToEEPROM("espnow");
+        Serial.println("Mode: espnow");
+        return "espnow";
+    }
+    else if (currentCommType == CommProtocol::ESPNOW)
+    {
+        currentCommType = CommProtocol::SERIALCOMM;
+        saveModeToEEPROM("serial");
+        Serial.println("Mode: serial");
+        return "serial";
+    }
+
+    Serial.println("toggleMode only supports serial/espnow");
+    return "unknown";
+}
+
+void WiSensToolkit::saveModeToEEPROM(const char *protocol)
+{
+    JsonDocument doc;
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    deserializeJson(doc, eepromStream);
+    doc["protocol"] = protocol;
+    EepromStream eepromStreamWrite(0, EEPROM_SIZE);
+    serializeJson(doc, eepromStreamWrite);
+    eepromStreamWrite.flush();
+}
+
+/**
+ * @brief Print the current configuration as JSON over serial
+ *
+ * Reads the full config from EEPROM (guaranteed to exist after createKit) so
+ * all host-only fields are preserved, then overlays the two values that can
+ * change at runtime without an EEPROM write: protocol (toggleMode) and
+ * calibrated.
+ */
+void WiSensToolkit::getConfig()
+{
+    JsonDocument doc;
+    EepromStream eepromStream(0, EEPROM_SIZE);
+    DeserializationError error = deserializeJson(doc, eepromStream);
+    if (error)
+    {
+        Serial.print("getConfig failed to read EEPROM: ");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    doc["calibrated"] = calibrated;
+
+    serializeJson(doc, Serial);
+    Serial.println();
 }
 
 /**

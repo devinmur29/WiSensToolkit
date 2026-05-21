@@ -699,7 +699,12 @@ public:
     void calibrate();
     void calibrateNoise();
     void minCalibrate();
+    void updatePot(uint8_t potStep);
+    void getPot();
     void stopComms();
+    String toggleMode();
+    void getConfig();
+    void updateMacAddress(const uint8_t macAddress[6]);
     bool serial_communication = true;
     void readNode(int readWire, int groundWire);
     float p = 15;
@@ -751,6 +756,7 @@ private:
     int totalNodes;
     CommProtocol currentCommType;
     CommConfig *thisCommConfig;
+    bool espNowInitialized = false;
     TwoDArray *currNodes;
     TwoDArray *pastNodes;
 
@@ -765,6 +771,7 @@ private:
     void createBuffer(struct_message *tactile_data);
 
     void sendSerial();
+    void saveModeToEEPROM(const char *protocol);
     void initDigiPot(uint8_t potStep);
     double calculateResistance(uint8_t potValue, int maxResistance);
     uint8_t calculatePotValue(double resistance, int maxResistance);
